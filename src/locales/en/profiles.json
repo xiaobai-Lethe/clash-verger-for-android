@@ -4,7 +4,9 @@
       "updateAll": "Update All Profiles",
       "viewRuntimeConfig": "View Runtime Config",
       "reactivate": "Reactivate Profiles",
-      "import": "Import"
+      "import": "Import",
+      "importConfig": "Import Profile Config",
+      "exportConfig": "Export Profile Config"
     },
     "batch": {
       "actions": {
@@ -23,6 +25,17 @@
       "placeholder": "Profile URL",
       "actions": {
         "paste": "Paste"
+      }
+    },
+    "configTransfer": {
+      "title": "Import / Export Clash YAML",
+      "placeholder": "Paste Clash/Mihomo YAML, or import it from a file/clipboard",
+      "actions": {
+        "paste": "Import from Clipboard",
+        "importFile": "Import from File",
+        "copy": "Copy Current Profile",
+        "exportFile": "Export to File",
+        "apply": "Import YAML"
       }
     },
     "feedback": {

@@ -21,11 +21,27 @@ use tokio::{
 
 type CmdResult<T = ()> = Result<T, String>;
 
+#[cfg(target_os = "android")]
+static ANDROID_JAVA_VM: std::sync::OnceLock<jni::JavaVM> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "android")]
+static ANDROID_ACTIVITY: std::sync::OnceLock<std::sync::Mutex<jni::objects::GlobalRef>> =
+    std::sync::OnceLock::new();
+
+#[cfg(target_os = "android")]
+static ANDROID_PENDING_YAML_IMPORT: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(target_os = "android")]
+static ANDROID_PENDING_YAML_EXPORT: std::sync::OnceLock<std::sync::Mutex<String>> =
+    std::sync::OnceLock::new();
+
 const MIHOMO_BYTES: &[u8] =
     include_bytes!("../../../mihomo-android-arm64-v8-v1.19.24/mihomo-android-arm64-v8");
 const DEFAULT_MIXED_PORT: u16 = 7897;
 const DEFAULT_CONTROLLER_PORT: u16 = 9097;
 const LOG_TAG: &str = "clash-verger-core";
+const DEFAULT_SUBSCRIPTION_USER_AGENT: &str = concat!("clash-verge/v", env!("CARGO_PKG_VERSION"));
 
 #[derive(Clone)]
 struct AppState {
@@ -36,8 +52,6 @@ struct AndroidRuntime {
     app_dir: PathBuf,
     core_dir: PathBuf,
     profile_dir: PathBuf,
-    backup_dir: PathBuf,
-    log_dir: PathBuf,
     config_path: PathBuf,
     verge_path: PathBuf,
     profiles_path: PathBuf,
@@ -178,12 +192,8 @@ impl AndroidRuntime {
             .context("failed to resolve app data dir")?;
         let core_dir = base.join("core");
         let profile_dir = base.join("profiles");
-        let backup_dir = base.join("backups");
-        let log_dir = base.join("logs");
         fs::create_dir_all(&core_dir)?;
         fs::create_dir_all(&profile_dir)?;
-        fs::create_dir_all(&backup_dir)?;
-        fs::create_dir_all(&log_dir)?;
 
         let runtime = Self {
             config_path: base.join("runtime.yaml"),
@@ -193,14 +203,13 @@ impl AndroidRuntime {
             app_dir: base,
             core_dir,
             profile_dir,
-            backup_dir,
-            log_dir,
             process: Mutex::new(None),
             logs: Mutex::new(VecDeque::with_capacity(1000)),
             started_at: Instant::now(),
             http: reqwest::Client::new(),
         };
         runtime.ensure_defaults()?;
+        runtime.ensure_core_binary()?;
         Ok(runtime)
     }
 
@@ -494,10 +503,6 @@ impl AndroidRuntime {
     }
 
     fn ensure_core_binary(&self) -> anyhow::Result<PathBuf> {
-        if let Some(path) = self.bundled_native_core_path() {
-            return Ok(path);
-        }
-
         let path = self.core_path();
         let needs_write = fs::metadata(&path)
             .map(|m| m.len() != MIHOMO_BYTES.len() as u64)
@@ -508,6 +513,13 @@ impl AndroidRuntime {
         }
         set_executable(&path)?;
         Ok(path)
+    }
+
+    fn executable_core_path(&self) -> anyhow::Result<PathBuf> {
+        if let Some(path) = self.bundled_native_core_path() {
+            return Ok(path);
+        }
+        self.ensure_core_binary()
     }
 
     async fn append_log(&self, line: String) {
@@ -536,7 +548,7 @@ impl AndroidRuntime {
             }
         }
 
-        let core = self.ensure_core_binary()?;
+        let core = self.executable_core_path()?;
         self.append_runtime_log(format!("mihomo binary path: {}", core.display()))
             .await;
 
@@ -606,7 +618,7 @@ impl AndroidRuntime {
         }
 
         let core_path = self
-            .ensure_core_binary()
+            .executable_core_path()
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_else(|error| format!("unavailable: {error}"));
 
@@ -1011,9 +1023,341 @@ fn validation_ok() -> ValidationOutcome {
     ValidationOutcome { status: "valid" }
 }
 
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {name}! You've been greeted from Rust!")
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_cla_verger_android_MainActivity_initRustAndroidBridge(
+    env: jni::JNIEnv,
+    activity: jni::objects::JObject,
+) {
+    match env.get_java_vm() {
+        Ok(vm) => {
+            let _ = ANDROID_JAVA_VM.set(vm);
+        }
+        Err(error) => {
+            eprintln!("failed to initialize Android JavaVM bridge: {error}");
+            return;
+        }
+    }
+
+    match env.new_global_ref(activity) {
+        Ok(activity_ref) => {
+            if let Some(slot) = ANDROID_ACTIVITY.get() {
+                if let Ok(mut guard) = slot.lock() {
+                    *guard = activity_ref;
+                }
+            } else {
+                let _ = ANDROID_ACTIVITY.set(std::sync::Mutex::new(activity_ref));
+            }
+        }
+        Err(error) => {
+            eprintln!("failed to initialize Android activity bridge: {error}");
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_cla_verger_android_MainActivity_onYamlFileOpened(
+    mut env: jni::JNIEnv,
+    _activity: jni::objects::JObject,
+    data: jni::objects::JString,
+) {
+    match env.get_string(&data) {
+        Ok(data) => {
+            let slot = ANDROID_PENDING_YAML_IMPORT
+                .get_or_init(|| std::sync::Mutex::new(None));
+            if let Ok(mut guard) = slot.lock() {
+                *guard = Some(data.into());
+            }
+        }
+        Err(error) => {
+            eprintln!("failed to receive Android YAML file data: {error}");
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_com_cla_verger_android_MainActivity_getYamlExportData(
+    env: jni::JNIEnv,
+    _activity: jni::objects::JObject,
+) -> jni::sys::jstring {
+    let data = ANDROID_PENDING_YAML_EXPORT
+        .get_or_init(|| std::sync::Mutex::new(String::new()))
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+    env.new_string(data)
+        .map(|value| value.into_raw())
+        .unwrap_or(std::ptr::null_mut())
+}
+
+#[cfg(target_os = "android")]
+fn call_android_static_bool(class_name: &str, method_name: &str) -> anyhow::Result<bool> {
+    let vm = ANDROID_JAVA_VM
+        .get()
+        .ok_or_else(|| anyhow!("Android JavaVM bridge is not initialized"))?;
+    let mut env = vm.attach_current_thread()?;
+    let activity_guard = ANDROID_ACTIVITY
+        .get()
+        .ok_or_else(|| anyhow!("Android activity bridge is not initialized"))?
+        .lock()
+        .map_err(|_| anyhow!("Android activity bridge is poisoned"))?;
+    let activity = activity_guard.as_obj();
+
+    let class_loader = env
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let class_name = env.new_string(class_name)?;
+    let class = env
+        .call_method(
+            class_loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[jni::objects::JValue::Object(&class_name)],
+        )?
+        .l()?;
+    let class = jni::objects::JClass::from(class);
+    let result = env.call_static_method(&class, method_name, "()Z", &[])?;
+    Ok(result.z()?)
+}
+
+#[cfg(target_os = "android")]
+fn call_android_static_bool_string(
+    class_name: &str,
+    method_name: &str,
+    argument: &str,
+) -> anyhow::Result<bool> {
+    let vm = ANDROID_JAVA_VM
+        .get()
+        .ok_or_else(|| anyhow!("Android JavaVM bridge is not initialized"))?;
+    let mut env = vm.attach_current_thread()?;
+    let activity_guard = ANDROID_ACTIVITY
+        .get()
+        .ok_or_else(|| anyhow!("Android activity bridge is not initialized"))?
+        .lock()
+        .map_err(|_| anyhow!("Android activity bridge is poisoned"))?;
+    let activity = activity_guard.as_obj();
+
+    let class_loader = env
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let class_name = env.new_string(class_name)?;
+    let class = env
+        .call_method(
+            class_loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[jni::objects::JValue::Object(&class_name)],
+        )?
+        .l()?;
+    let class = jni::objects::JClass::from(class);
+    let argument = env.new_string(argument)?;
+    let result = env.call_static_method(
+        &class,
+        method_name,
+        "(Ljava/lang/String;)Z",
+        &[jni::objects::JValue::Object(&argument)],
+    )?;
+    Ok(result.z()?)
+}
+
+#[cfg(target_os = "android")]
+fn request_android_yaml_open() -> anyhow::Result<bool> {
+    call_android_static_bool("com.cla.verger.android.MainActivity", "openYamlFileFromRust")
+}
+
+#[cfg(not(target_os = "android"))]
+fn request_android_yaml_open() -> anyhow::Result<bool> {
+    Ok(false)
+}
+
+#[cfg(target_os = "android")]
+fn request_android_yaml_save(file_name: &str, data: String) -> anyhow::Result<bool> {
+    let slot = ANDROID_PENDING_YAML_EXPORT.get_or_init(|| std::sync::Mutex::new(String::new()));
+    *slot
+        .lock()
+        .map_err(|_| anyhow!("Android YAML export slot is poisoned"))? = data;
+    call_android_static_bool_string(
+        "com.cla.verger.android.MainActivity",
+        "saveYamlFileFromRust",
+        file_name,
+    )
+}
+
+#[cfg(not(target_os = "android"))]
+fn request_android_yaml_save(_file_name: &str, _data: String) -> anyhow::Result<bool> {
+    Ok(false)
+}
+
+#[cfg(target_os = "android")]
+fn request_android_vpn_start(app: &AppHandle) -> anyhow::Result<bool> {
+    let _ = app;
+    call_android_static_bool("com.cla.verger.android.MainActivity", "requestVpnFromRust")
+}
+
+#[cfg(not(target_os = "android"))]
+fn request_android_vpn_start(_app: &AppHandle) -> anyhow::Result<bool> {
+    Ok(true)
+}
+
+#[cfg(target_os = "android")]
+fn request_android_vpn_stop(app: &AppHandle) -> anyhow::Result<bool> {
+    let _ = app;
+    call_android_static_bool("com.cla.verger.android.MainActivity", "stopVpnFromRust")
+}
+
+#[cfg(not(target_os = "android"))]
+fn request_android_vpn_stop(_app: &AppHandle) -> anyhow::Result<bool> {
+    Ok(true)
+}
+
+#[cfg(target_os = "android")]
+fn android_vpn_service_running(app: &AppHandle) -> anyhow::Result<bool> {
+    let _ = app;
+    call_android_static_bool("com.cla.verger.android.ClashVpnService", "isRunning")
+}
+
+#[cfg(not(target_os = "android"))]
+fn android_vpn_service_running(_app: &AppHandle) -> anyhow::Result<bool> {
+    Ok(false)
+}
+
+#[cfg(target_os = "android")]
+fn android_vpn_tunnel_running(app: &AppHandle) -> anyhow::Result<bool> {
+    let _ = app;
+    call_android_static_bool("com.cla.verger.android.ClashVpnService", "isTunnelRunning")
+}
+
+#[cfg(not(target_os = "android"))]
+fn android_vpn_tunnel_running(_app: &AppHandle) -> anyhow::Result<bool> {
+    Ok(false)
+}
+
+fn option_bool(option: Option<&Value>, key: &str) -> bool {
+    option
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn option_u64(option: Option<&Value>, key: &str, default: u64) -> u64 {
+    option
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
+fn option_string(option: Option<&Value>, key: &str) -> Option<String> {
+    option
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn subscription_user_agent(option: Option<&Value>) -> String {
+    option_string(option, "user_agent")
+        .unwrap_or_else(|| DEFAULT_SUBSCRIPTION_USER_AGENT.to_string())
+}
+
+fn validate_subscription_yaml(data: &str) -> anyhow::Result<String> {
+    let data = data.trim_start_matches('\u{feff}').to_string();
+    let yaml: Value = serde_yaml::from_str(&data).context("remote profile is not valid YAML")?;
+    let object = yaml
+        .as_object()
+        .ok_or_else(|| anyhow!("remote profile YAML must be an object"))?;
+    if !object.contains_key("proxies") && !object.contains_key("proxy-providers") {
+        return Err(anyhow!(
+            "remote profile does not contain `proxies` or `proxy-providers`"
+        ));
+    }
+    Ok(data)
+}
+
+async fn fetch_subscription_with_client(
+    url: &str,
+    user_agent: &str,
+    proxy_url: Option<&str>,
+    timeout_secs: u64,
+    accept_invalid_certs: bool,
+) -> anyhow::Result<String> {
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(Duration::from_secs(timeout_secs))
+        .connect_timeout(Duration::from_secs(timeout_secs.min(30)))
+        .tcp_keepalive(Duration::from_secs(60))
+        .no_proxy();
+
+    if let Some(proxy_url) = proxy_url {
+        builder = builder.proxy(reqwest::Proxy::all(proxy_url)?);
+    }
+    if accept_invalid_certs {
+        builder = builder
+            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true);
+    }
+
+    let response = builder
+        .build()?
+        .get(url)
+        .header(reqwest::header::USER_AGENT, user_agent)
+        .header(
+            reqwest::header::ACCEPT,
+            "text/yaml, application/yaml, application/x-yaml, text/plain, */*",
+        )
+        .header(reqwest::header::CACHE_CONTROL, "no-cache")
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch remote profile with UA `{user_agent}`"))?;
+
+    let status = response.status();
+    let data = response.text().await.context("failed to read profile response")?;
+    if !status.is_success() {
+        return Err(anyhow!("remote profile request failed with HTTP {status}: {data}"));
+    }
+    validate_subscription_yaml(&data)
+}
+
+async fn download_subscription(url: &str, option: Option<&Value>) -> anyhow::Result<String> {
+    let timeout_secs = option_u64(option, "timeout_seconds", 20);
+    let accept_invalid_certs = option_bool(option, "danger_accept_invalid_certs");
+    let wants_proxy = option_bool(option, "self_proxy") || option_bool(option, "with_proxy");
+    let local_proxy = format!("http://127.0.0.1:{DEFAULT_MIXED_PORT}");
+
+    let mut proxies: Vec<Option<&str>> = if wants_proxy {
+        vec![Some(local_proxy.as_str()), None]
+    } else {
+        vec![None, Some(local_proxy.as_str())]
+    };
+    proxies.dedup();
+
+    let mut last_error = String::new();
+    let user_agent = subscription_user_agent(option);
+    for proxy_url in proxies {
+        match fetch_subscription_with_client(
+            url,
+            &user_agent,
+            proxy_url,
+            timeout_secs,
+            accept_invalid_certs,
+        )
+        .await
+        {
+            Ok(data) => return Ok(data),
+            Err(error) => {
+                last_error = format!(
+                    "{} via {}: {error}",
+                    user_agent,
+                    proxy_url.unwrap_or("direct")
+                );
+            }
+        }
+    }
+
+    Err(anyhow!("failed to import subscription; last error: {last_error}"))
 }
 
 #[tauri::command]
@@ -1331,6 +1675,33 @@ async fn save_profile_file(
 }
 
 #[tauri::command]
+async fn open_yaml_file_picker() -> CmdResult<bool> {
+    request_android_yaml_open().map_err(stringify_error)
+}
+
+#[tauri::command]
+async fn take_opened_yaml_file() -> CmdResult<Option<String>> {
+    #[cfg(target_os = "android")]
+    {
+        let slot = ANDROID_PENDING_YAML_IMPORT.get_or_init(|| std::sync::Mutex::new(None));
+        return slot
+            .lock()
+            .map(|mut guard| guard.take())
+            .map_err(|_| "Android YAML import slot is poisoned".to_string());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+async fn save_yaml_file_picker(file_name: String, data: String) -> CmdResult<bool> {
+    request_android_yaml_save(&file_name, data).map_err(stringify_error)
+}
+
+#[tauri::command]
 async fn view_profile(_index: String) -> CmdResult {
     Ok(())
 }
@@ -1338,10 +1709,7 @@ async fn view_profile(_index: String) -> CmdResult {
 #[tauri::command]
 async fn import_profile(app: AppHandle, url: String, option: Option<Value>) -> CmdResult {
     let data = if url.starts_with("http://") || url.starts_with("https://") {
-        reqwest::get(&url)
-            .await
-            .map_err(stringify_error)?
-            .text()
+        download_subscription(&url, option.as_ref())
             .await
             .map_err(stringify_error)?
     } else {
@@ -1355,8 +1723,50 @@ async fn import_profile(app: AppHandle, url: String, option: Option<Value>) -> C
 }
 
 #[tauri::command]
-async fn update_profile(_index: String, _option: Option<Value>) -> CmdResult {
-    Ok(())
+async fn update_profile(app: AppHandle, index: String, option: Option<Value>) -> CmdResult {
+    let runtime = state(&app);
+    let mut profiles = runtime.read_profiles_config().map_err(stringify_error)?;
+    let items = profiles
+        .get_mut("items")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| "invalid profiles config".to_string())?;
+
+    let item = items
+        .iter_mut()
+        .find(|item| item.get("uid").and_then(Value::as_str) == Some(index.as_str()))
+        .ok_or_else(|| "profile not found".to_string())?;
+
+    let url = item
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "profile has no subscription url".to_string())?
+        .to_string();
+
+    let merged_option = match (item.get("option"), option.as_ref()) {
+        (Some(Value::Object(base)), Some(Value::Object(next))) => {
+            let mut merged = Value::Object(base.clone());
+            AndroidRuntime::patch_object(&mut merged, Value::Object(next.clone()));
+            Some(merged)
+        }
+        (_, Some(next)) => Some(next.clone()),
+        (Some(current), None) => Some(current.clone()),
+        (None, None) => None,
+    };
+
+    let data = download_subscription(&url, merged_option.as_ref())
+        .await
+        .map_err(stringify_error)?;
+    fs::write(runtime.profile_dir.join(format!("{index}.yaml")), data).map_err(stringify_error)?;
+
+    if let Some(object) = item.as_object_mut() {
+        object.insert("updated".into(), json!(chrono::Local::now().timestamp()));
+        if let Some(option) = merged_option {
+            object.insert("option".into(), option);
+        }
+    }
+    runtime
+        .write_json(&runtime.profiles_path, &profiles)
+        .map_err(stringify_error)
 }
 
 #[tauri::command]
@@ -1663,23 +2073,44 @@ async fn upgrade_core() -> CmdResult {
 }
 
 #[tauri::command]
-async fn request_vpn_permission() -> CmdResult<Value> {
-    Ok(
-        json!({ "granted": true, "message": "VPN permission is requested by Android on app startup" }),
-    )
+async fn request_vpn_permission(app: AppHandle) -> CmdResult<Value> {
+    let requested = request_android_vpn_start(&app).map_err(stringify_error)?;
+    Ok(json!({
+        "granted": requested,
+        "message": if requested {
+            "VPN permission request started"
+        } else {
+            "Android activity is not ready"
+        }
+    }))
 }
 
 #[tauri::command]
 async fn start_vpn(app: AppHandle) -> CmdResult<Value> {
-    start_core(app).await?;
+    let runtime = state(&app);
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = runtime.start_core(handle).await {
+            runtime
+                .append_runtime_log(format!("failed to start mihomo after proxy toggle: {error}"))
+                .await;
+        }
+    });
+    let vpn_requested = request_android_vpn_start(&app).map_err(stringify_error)?;
     Ok(json!({
         "running": true,
-        "message": "mihomo started; Android VpnService forwards traffic through 127.0.0.1:7897"
+        "vpn_requested": vpn_requested,
+        "message": if vpn_requested {
+            "mihomo is starting in background; Android VPN start requested"
+        } else {
+            "mihomo is starting in background; Android activity is not ready"
+        }
     }))
 }
 
 #[tauri::command]
 async fn stop_vpn(app: AppHandle) -> CmdResult<Value> {
+    let _ = request_android_vpn_stop(&app);
     stop_core(app).await?;
     Ok(json!({ "running": false }))
 }
@@ -1687,9 +2118,14 @@ async fn stop_vpn(app: AppHandle) -> CmdResult<Value> {
 #[tauri::command]
 async fn get_vpn_status(app: AppHandle) -> CmdResult<Value> {
     let status = state(&app).core_status().await.map_err(stringify_error)?;
+    let vpn_service_running = android_vpn_service_running(&app).unwrap_or(false);
+    let vpn_tunnel_running = android_vpn_tunnel_running(&app).unwrap_or(false);
     Ok(json!({
-        "running": status.running,
-        "permission": "unknown",
+        "running": vpn_tunnel_running,
+        "core_running": status.running,
+        "vpn_running": vpn_tunnel_running,
+        "vpn_service_running": vpn_service_running,
+        "permission": if vpn_tunnel_running { "granted" } else { "unknown" },
         "core_path": status.core_path,
         "controller_port": status.controller_port,
         "mixed_port": status.mixed_port
@@ -1726,8 +2162,8 @@ pub fn run() {
                         runtime
                             .append_runtime_log(format!(
                                 "failed to generate runtime config at startup: {error}"
-                            ))
-                            .await;
+                        ))
+                        .await;
                     }
                 }
                 if let Err(error) = runtime.start_core(handle).await {
@@ -1740,13 +2176,11 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
-            greet,
             get_app_dir,
             get_verge_config,
             patch_verge_config,
@@ -1777,6 +2211,9 @@ pub fn run() {
             create_profile,
             read_profile_file,
             save_profile_file,
+            open_yaml_file_picker,
+            take_opened_yaml_file,
+            save_yaml_file_picker,
             view_profile,
             import_profile,
             update_profile,

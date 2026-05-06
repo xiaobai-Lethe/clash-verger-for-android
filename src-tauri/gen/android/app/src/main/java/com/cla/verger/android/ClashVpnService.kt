@@ -9,11 +9,13 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import androidx.annotation.Keep
 import java.io.File
 import java.net.InetSocketAddress
 import java.net.Socket
 import kotlin.concurrent.thread
 
+@Keep
 class ClashVpnService : VpnService() {
   private var tun: ParcelFileDescriptor? = null
   @Volatile private var started = false
@@ -25,16 +27,21 @@ class ClashVpnService : VpnService() {
   external fun TProxyGetStats(): LongArray
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    Log.i(TAG, "onStartCommand action=${intent?.action ?: "start"}")
     startForeground(NOTIFICATION_ID, buildNotification())
 
     if (intent?.action == ACTION_STOP) {
+      Log.i(TAG, "Stopping Android VPN service")
+      serviceRunning = false
+      teardownTunnel()
       stopSelf()
       return START_NOT_STICKY
     }
 
+    serviceRunning = true
     startSupervisor()
 
-    return START_STICKY
+    return START_NOT_STICKY
   }
 
   override fun onRevoke() {
@@ -44,6 +51,7 @@ class ClashVpnService : VpnService() {
 
   override fun onDestroy() {
     stopping = true
+    serviceRunning = false
     teardownTunnel()
     super.onDestroy()
   }
@@ -109,6 +117,7 @@ class ClashVpnService : VpnService() {
     tun = descriptor
     TProxyStartService(configPath, descriptor.fd)
     started = true
+    tunnelRunning = true
     Log.i(TAG, "VPN tunnel started with hev-socks5-tunnel, socks=127.0.0.1:$SOCKS_PORT")
   }
 
@@ -125,6 +134,7 @@ class ClashVpnService : VpnService() {
     }
     tun = null
     started = false
+    tunnelRunning = false
   }
 
   private fun waitForLocalPort(host: String, port: Int, timeoutMs: Long): Boolean {
@@ -206,12 +216,15 @@ class ClashVpnService : VpnService() {
     private const val MTU = 8500
     private const val SOCKS_PORT = 7897
     private const val ACTION_STOP = "com.cla.verger.android.STOP_VPN"
+    @Volatile private var serviceRunning = false
+    @Volatile private var tunnelRunning = false
 
     init {
       System.loadLibrary("hev-socks5-tunnel")
     }
 
     fun start(context: Context) {
+      Log.i(TAG, "Starting Android VPN service")
       val intent = Intent(context, ClashVpnService::class.java)
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         context.startForegroundService(intent)
@@ -221,8 +234,18 @@ class ClashVpnService : VpnService() {
     }
 
     fun stop(context: Context) {
+      Log.i(TAG, "Requesting Android VPN service stop")
       val intent = Intent(context, ClashVpnService::class.java).setAction(ACTION_STOP)
+      serviceRunning = false
       context.startService(intent)
     }
+
+    @JvmStatic
+    @Keep
+    fun isRunning(): Boolean = serviceRunning
+
+    @JvmStatic
+    @Keep
+    fun isTunnelRunning(): Boolean = tunnelRunning
   }
 }

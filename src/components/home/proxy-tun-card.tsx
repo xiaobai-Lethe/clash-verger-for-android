@@ -22,9 +22,10 @@ import { showNotice } from '@/services/notice-service'
 export const ProxyTunCard = () => {
   const theme = useTheme()
   const [busy, setBusy] = useState(false)
+  const [pendingRunning, setPendingRunning] = useState(false)
   const { networkInterfaces } = useNetworkInterfaces()
 
-  const { data, refetch, isFetching } = useQuery({
+  const { data, refetch } = useQuery({
     queryKey: ['getVpnStatus'],
     queryFn: getVpnStatus,
     refetchInterval: 3000,
@@ -32,7 +33,10 @@ export const ProxyTunCard = () => {
   })
 
   const running = data?.running ?? false
+  const displayRunning = busy ? pendingRunning : running
   const mixedPort = data?.mixed_port ?? 7897
+  const coreRunning = data?.core_running ?? false
+  const serviceRunning = data?.vpn_service_running ?? false
   const lanEndpoint = useMemo(() => {
     const candidates = networkInterfaces
       .flatMap((item) =>
@@ -52,25 +56,35 @@ export const ProxyTunCard = () => {
     : '未检测到局域网 IP'
 
   const description = useMemo(() => {
-    if (running) {
-      return `mihomo 正在运行，mixed-port ${mixedPort}`
+    if (displayRunning) {
+      return `Android VPN 已连接，mixed-port ${mixedPort}`
     }
-    return '开启后启动 mihomo，本机应用可通过系统代理端口连接。'
-  }, [mixedPort, running])
+    if (serviceRunning) {
+      return coreRunning
+        ? 'VPN 服务已启动，正在等待 TUN 建立。'
+        : 'VPN 服务已启动，正在等待 mihomo mixed-port。'
+    }
+    if (coreRunning) {
+      return 'mihomo 已运行，但 Android VPN 未连接。'
+    }
+    return '开启后启动 mihomo 并连接 Android VPN。'
+  }, [coreRunning, displayRunning, mixedPort, serviceRunning])
 
   const toggleCore = useLockFn(async (enabled: boolean) => {
+    setBusy(true)
+    setPendingRunning(enabled)
+
     try {
-      setBusy(true)
-      if (enabled) {
-        await startVpn()
-      } else {
-        await stopVpn()
+      await (enabled ? startVpn() : stopVpn())
+      const status = await waitForVpnState(enabled, refetch)
+      if (enabled && !status) {
+        showNotice.error('系统代理启动超时，请查看日志')
       }
-      await refetch()
     } catch (err) {
       showNotice.error(err)
     } finally {
       setBusy(false)
+      void refetch()
     }
   })
 
@@ -97,13 +111,13 @@ export const ProxyTunCard = () => {
           p: 1,
           pr: 1.5,
           borderRadius: 1.5,
-          bgcolor: running
+          bgcolor: displayRunning
             ? alpha(theme.palette.success.main, 0.07)
             : alpha(theme.palette.warning.main, 0.06),
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>
-          {running ? (
+          {displayRunning ? (
             <PlayCircleOutlineRounded sx={{ color: 'success.main', mr: 1 }} />
           ) : (
             <PauseCircleOutlineRounded sx={{ color: 'text.disabled', mr: 1 }} />
@@ -115,8 +129,8 @@ export const ProxyTunCard = () => {
               </Typography>
               <Chip
                 size="small"
-                color={running ? 'success' : 'default'}
-                label={running ? '运行中' : '已停止'}
+                color={displayRunning ? 'success' : 'default'}
+                label={busy ? '处理中' : displayRunning ? '运行中' : '已停止'}
               />
             </Stack>
             <Typography
@@ -135,8 +149,8 @@ export const ProxyTunCard = () => {
 
         <Switch
           edge="end"
-          disabled={busy || isFetching}
-          checked={running}
+          disabled={busy}
+          checked={displayRunning}
           onChange={(_, checked) => toggleCore(checked)}
         />
       </Box>
@@ -151,7 +165,7 @@ export const ProxyTunCard = () => {
         size="small"
         sx={{ mt: 1 }}
         loading={busy}
-        disabled={!running}
+        disabled={!displayRunning}
         startIcon={<RestartAltRounded />}
         onClick={onRestart}
       >
@@ -220,3 +234,22 @@ const lanInterfaceScore = (name: string) => {
   if (normalized.startsWith('usb') || normalized.startsWith('rndis')) return 70
   return 0
 }
+
+const waitForVpnState = async (
+  expected: boolean,
+  refetch: () => Promise<{ data?: Awaited<ReturnType<typeof getVpnStatus>> }>,
+) => {
+  const deadline = Date.now() + (expected ? 10_000 : 4_000)
+
+  while (Date.now() < deadline) {
+    const result = await refetch()
+    if ((result.data?.running ?? false) === expected) {
+      return true
+    }
+    await sleep(500)
+  }
+
+  return false
+}
+
+const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms))

@@ -15,18 +15,33 @@ import {
   ClearRounded,
   ContentPasteRounded,
   DeleteRounded,
+  FileDownloadRounded,
+  FileUploadRounded,
   IndeterminateCheckBoxRounded,
   LocalFireDepartmentRounded,
   RefreshRounded,
   TextSnippetOutlined,
 } from '@mui/icons-material'
 import { LoadingButton } from '@mui/lab'
-import { Box, Button, Divider, Grid, IconButton, Stack } from '@mui/material'
+import {
+  Box,
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Divider,
+  Grid,
+  IconButton,
+  Stack,
+  TextField,
+} from '@mui/material'
 import { useQuery } from '@tanstack/react-query'
 import { listen, TauriEvent } from '@tauri-apps/api/event'
-import { readText } from '@tauri-apps/plugin-clipboard-manager'
+import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { readTextFile } from '@tauri-apps/plugin-fs'
 import { useLockFn } from 'ahooks'
+import { load as parseYaml } from 'js-yaml'
 import { throttle } from 'lodash-es'
 import {
   useCallback,
@@ -58,7 +73,11 @@ import {
   //restartCore,
   getRuntimeLogs,
   importProfile,
+  openYamlFilePicker,
+  readProfileFile,
   reorderProfile,
+  saveYamlFilePicker,
+  takeOpenedYamlFile,
   updateProfile,
 } from '@/services/cmds'
 import { showNotice } from '@/services/notice-service'
@@ -109,6 +128,8 @@ const ProfilePage = () => {
   const [disabled, setDisabled] = useState(false)
   const [activatings, setActivatings] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
+  const [configImportOpen, setConfigImportOpen] = useState(false)
+  const [configImportText, setConfigImportText] = useState('')
 
   // Batch selection states
   const [batchMode, setBatchMode] = useState(false)
@@ -225,6 +246,28 @@ const ProfilePage = () => {
       unsubscribe.then((cleanup) => cleanup())
     }
   }, [addListener, mutateProfiles, t])
+
+  useEffect(() => {
+    if (!configImportOpen) return
+
+    let disposed = false
+    const timer = window.setInterval(() => {
+      takeOpenedYamlFile()
+        .then((data) => {
+          if (!disposed && data) {
+            setConfigImportText(data)
+          }
+        })
+        .catch((err) => {
+          if (!disposed) console.warn('[Profile] failed to take YAML file:', err)
+        })
+    }, 500)
+
+    return () => {
+      disposed = true
+      window.clearInterval(timer)
+    }
+  }, [configImportOpen])
 
   // 添加紧急恢复功能
   const onEmergencyRefresh = useLockFn(async () => {
@@ -655,6 +698,102 @@ const ProfilePage = () => {
     if (text) setUrl(text)
   }
 
+  const getCurrentProfileItem = () => {
+    return profileItems.find((item) => item.uid === profiles.current)
+  }
+
+  const validateClashProfileYaml = (text: string) => {
+    const parsed = parseYaml(text)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('订阅配置必须是 Clash/Mihomo YAML 对象')
+    }
+    const profile = parsed as Record<string, unknown>
+    if (!profile.proxies && !profile['proxy-providers']) {
+      throw new Error('订阅配置缺少 proxies 或 proxy-providers')
+    }
+  }
+
+  const readCurrentProfileYaml = async () => {
+    const currentProfile = getCurrentProfileItem()
+    if (!currentProfile?.uid) {
+      throw new Error('请先选择一个订阅配置')
+    }
+    return readProfileFile(currentProfile.uid)
+  }
+
+  const applyProfilesConfigText = async (text: string) => {
+    validateClashProfileYaml(text)
+    const name = `local-profile-${new Date()
+      .toISOString()
+      .replace(/[:.]/g, '-')
+      .slice(0, 19)}`
+    await createProfile(
+      {
+        type: 'local',
+        name,
+        desc: 'Imported from YAML',
+        url: '',
+        option: {
+          with_proxy: false,
+          self_proxy: false,
+        },
+      },
+      text,
+    )
+    setConfigImportText('')
+    setConfigImportOpen(false)
+    await mutateProfiles()
+    await onEnhance(false)
+    showNotice.success('机场订阅配置已导入')
+  }
+
+  const onExportProfilesToClipboard = async () => {
+    try {
+      await writeText(await readCurrentProfileYaml())
+      showNotice.success('当前订阅 YAML 已复制到剪贴板')
+    } catch (err) {
+      showNotice.error(err)
+    }
+  }
+
+  const onExportProfilesToFile = async () => {
+    try {
+      const currentProfile = getCurrentProfileItem()
+      const data = await readCurrentProfileYaml()
+      const ok = await saveYamlFilePicker(
+        `${currentProfile?.name || currentProfile?.uid || 'mihomo-profile'}.yaml`,
+        data,
+      )
+      if (!ok) throw new Error('Android 文件保存器未就绪')
+      showNotice.success('请选择保存位置')
+    } catch (err) {
+      showNotice.error(err)
+    }
+  }
+
+  const onImportProfilesFromClipboard = async () => {
+    try {
+      const text = await readText()
+      if (!text?.trim()) {
+        showNotice.error('剪贴板没有可导入的 Clash/Mihomo 配置')
+        return
+      }
+      setConfigImportText(text)
+      setConfigImportOpen(true)
+    } catch (err) {
+      showNotice.error(err)
+    }
+  }
+
+  const onImportProfilesFromFile = async () => {
+    try {
+      const ok = await openYamlFilePicker()
+      if (!ok) throw new Error('Android 文件选择器未就绪')
+    } catch (err) {
+      showNotice.error(err)
+    }
+  }
+
   // Batch selection functions
   const toggleBatchMode = () => {
     setBatchMode(!batchMode)
@@ -832,6 +971,31 @@ const ProfilePage = () => {
                 onClick={onUpdateAll}
               >
                 <RefreshRounded />
+              </IconButton>
+
+              <IconButton
+                size="small"
+                color="inherit"
+                title={t('profiles.page.actions.importConfig')}
+                onClick={() => setConfigImportOpen(true)}
+              >
+                <FileUploadRounded />
+              </IconButton>
+
+              <IconButton
+                size="small"
+                color="inherit"
+                title={t('profiles.page.actions.exportConfig')}
+                onClick={() => {
+                  readCurrentProfileYaml()
+                    .then((text) => {
+                      setConfigImportText(text)
+                      setConfigImportOpen(true)
+                    })
+                    .catch((err) => showNotice.error(err))
+                }}
+              >
+                <FileDownloadRounded />
               </IconButton>
 
               <IconButton
@@ -1088,6 +1252,73 @@ const ProfilePage = () => {
         }}
       />
       <ConfigViewer ref={configRef} />
+      <Dialog
+        open={configImportOpen}
+        onClose={() => setConfigImportOpen(false)}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle>{t('profiles.page.configTransfer.title')}</DialogTitle>
+        <DialogContent>
+          <Stack spacing={1.5} sx={{ pt: 0.5 }}>
+            <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={onImportProfilesFromClipboard}
+              >
+                {t('profiles.page.configTransfer.actions.paste')}
+              </Button>
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={onImportProfilesFromFile}
+              >
+                {t('profiles.page.configTransfer.actions.importFile')}
+              </Button>
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={onExportProfilesToClipboard}
+              >
+                {t('profiles.page.configTransfer.actions.copy')}
+              </Button>
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={onExportProfilesToFile}
+              >
+                {t('profiles.page.configTransfer.actions.exportFile')}
+              </Button>
+            </Stack>
+            <TextField
+              value={configImportText}
+              onChange={(event) => setConfigImportText(event.target.value)}
+              multiline
+              minRows={8}
+              maxRows={14}
+              fullWidth
+              placeholder={t('profiles.page.configTransfer.placeholder')}
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfigImportOpen(false)}>
+            {t('shared.actions.cancel')}
+          </Button>
+          <Button
+            variant="contained"
+            disabled={!configImportText.trim()}
+            onClick={() => {
+              applyProfilesConfigText(configImportText).catch((err) =>
+                showNotice.error(err),
+              )
+            }}
+          >
+            {t('profiles.page.configTransfer.actions.apply')}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </BasePage>
   )
 }

@@ -344,7 +344,9 @@ export interface TranslationResources {
       }
       page: {
         actions: {
+          exportConfig: string
           import: string
+          importConfig: string
           reactivate: string
           updateAll: string
           viewRuntimeConfig: string
@@ -360,6 +362,17 @@ export interface TranslationResources {
             items: string
             selected: string
           }
+          title: string
+        }
+        configTransfer: {
+          actions: {
+            apply: string
+            copy: string
+            exportFile: string
+            importFile: string
+            paste: string
+          }
+          placeholder: string
           title: string
         }
         feedback: {

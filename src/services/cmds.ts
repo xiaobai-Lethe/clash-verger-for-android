@@ -52,6 +52,18 @@ export async function saveProfileFile(index: string, fileData: string) {
   )
 }
 
+export async function openYamlFilePicker() {
+  return invoke<boolean>('open_yaml_file_picker')
+}
+
+export async function takeOpenedYamlFile() {
+  return invoke<string | null>('take_opened_yaml_file')
+}
+
+export async function saveYamlFilePicker(fileName: string, data: string) {
+  return invoke<boolean>('save_yaml_file_picker', { fileName, data })
+}
+
 export async function importProfile(url: string, option?: IProfileOption) {
   return invoke<void>('import_profile', {
     url,
@@ -328,6 +340,9 @@ export async function getCoreStatus() {
 
 export interface VpnStatus {
   running: boolean
+  core_running?: boolean
+  vpn_running?: boolean
+  vpn_service_running?: boolean
   permission?: string
   core_path?: string
   controller_port?: number

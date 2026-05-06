@@ -4,7 +4,9 @@
       "updateAll": "更新所有订阅",
       "viewRuntimeConfig": "查看运行时订阅",
       "reactivate": "重新激活订阅",
-      "import": "导入"
+      "import": "导入",
+      "importConfig": "导入订阅配置",
+      "exportConfig": "导出订阅配置"
     },
     "batch": {
       "actions": {
@@ -23,6 +25,17 @@
       "placeholder": "订阅文件链接",
       "actions": {
         "paste": "粘贴"
+      }
+    },
+    "configTransfer": {
+      "title": "机场订阅 YAML 导入/导出",
+      "placeholder": "粘贴 Clash/Mihomo YAML，或从文件/剪贴板导入",
+      "actions": {
+        "paste": "从剪贴板导入",
+        "importFile": "从文件导入",
+        "copy": "复制当前订阅",
+        "exportFile": "导出到文件",
+        "apply": "导入 YAML"
       }
     },
     "feedback": {

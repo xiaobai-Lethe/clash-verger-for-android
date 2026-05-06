@@ -15,7 +15,6 @@ import {
   Tabs,
   Typography,
 } from '@mui/material'
-import { save } from '@tauri-apps/plugin-dialog'
 import { useLockFn } from 'ahooks'
 import dayjs from 'dayjs'
 import customParseFormat from 'dayjs/plugin/customParseFormat'
@@ -250,11 +249,9 @@ export const BackupHistoryViewer = ({
   const handleExport = useLockFn(async (filename: string) => {
     if (isRestarting) return
     if (!isLocal) return
-    const savePath = await save({ defaultPath: filename })
-    if (!savePath || Array.isArray(savePath)) return
     try {
-      await exportLocalBackup(filename, savePath)
-      showNotice.success('settings.modals.backup.messages.localBackupExported')
+      await exportLocalBackup(filename, filename)
+      showNotice.info('Android 暂不支持导出本地备份文件')
     } catch (ignoreError: unknown) {
       showNotice.error(
         'settings.modals.backup.messages.localBackupExportFailed',

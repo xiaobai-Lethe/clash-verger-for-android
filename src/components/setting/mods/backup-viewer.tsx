@@ -7,7 +7,6 @@ import {
   Stack,
   Typography,
 } from '@mui/material'
-import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import { useLockFn } from 'ahooks'
 import type { ReactNode, Ref } from 'react'
 import { useCallback, useImperativeHandle, useState } from 'react'
@@ -80,16 +79,10 @@ export function BackupViewer({ ref }: { ref?: Ref<DialogRef> }) {
   })
 
   const handleImport = useLockFn(async () => {
-    const selected = await openDialog({
-      multiple: false,
-      filters: [{ name: 'Backup File', extensions: ['zip'] }],
-    })
-    if (!selected || Array.isArray(selected)) return
     try {
       setLocalImporting(true)
-      await importLocalBackup(selected)
-      showNotice.success('settings.modals.backup.messages.localBackupImported')
-      openHistory('local')
+      await importLocalBackup('')
+      showNotice.info('Android 暂不支持导入本地备份文件')
     } catch (error) {
       console.error(error)
       showNotice.error(
