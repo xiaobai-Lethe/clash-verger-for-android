@@ -2,9 +2,9 @@
 
 [中文](README.md) | [English](README.en.md) | [日本語](README.ja.md)
 
-这是一个基于 Android 的 Clash Verge Rev 客户端移植适配项目。
+これは Clash Verge Rev を Android クライアント向けに移植・調整したプロジェクトです。
 
-## 使用语言与技术
+## 使用言語と技術
 
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
 ![React](https://img.shields.io/badge/React-61DAFB?logo=react&logoColor=20232A)
@@ -15,10 +15,10 @@
 ![YAML](https://img.shields.io/badge/YAML-CB171E?logo=yaml&logoColor=white)
 ![JSON](https://img.shields.io/badge/JSON-000000?logo=json&logoColor=white)
 
-## Star 增长图
+## Star 履歴
 
 [![Star History Chart](https://api.star-history.com/svg?repos=xiaobai-Lethe/clash-verger-for-android&type=Date)](https://www.star-history.com/#xiaobai-Lethe/clash-verger-for-android&Date)
 
-## 原作者 / 上游项目
+## 原作者 / 上流プロジェクト
 
 [clash-verge-rev/clash-verge-rev](https://github.com/clash-verge-rev/clash-verge-rev)
