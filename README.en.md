@@ -4,7 +4,7 @@
 
 This is an Android client adaptation of Clash Verge Rev.
 
-## Languages and Technologies
+## use for
 
 ![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
 ![React](https://img.shields.io/badge/React-61DAFB?logo=react&logoColor=20232A)
@@ -18,6 +18,27 @@ This is an Android client adaptation of Clash Verge Rev.
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=xiaobai-Lethe/clash-verger-for-android&type=Date)](https://www.star-history.com/#xiaobai-Lethe/clash-verger-for-android&Date)
+
+## Bug Report
+
+If you find a bug, please submit an Issue:
+
+[Submit Issue](https://github.com/xiaobai-Lethe/clash-verger-for-android/issues/new)
+
+```md
+## Reproduction Steps
+1. Open ...
+2. Click ...
+3. See ...
+
+## Environment
+- App version:
+- Android version:
+- Device model:
+- Mihomo core version:
+```
+
+Contact email: white3432551933@gmail.com
 
 ## Original Author / Upstream Project
 
